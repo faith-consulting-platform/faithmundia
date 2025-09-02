@@ -1,0 +1,47 @@
+{
+  "name": "faith-mundia-consulting",
+  "version": "1.0.0",
+  "description": "Faith Mundia Consulting Platform - Professional consulting services",
+  "type": "module",
+  "main": "dist/index.js",
+  "license": "MIT",
+  "scripts": {
+    "start": "NODE_ENV=production node dist/index.js",
+    "db:push": "drizzle-kit push"
+  },
+  "dependencies": {
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "connect-pg-simple": "^10.0.0",
+    "date-fns": "^3.6.0",
+    "drizzle-orm": "^0.39.1",
+    "drizzle-zod": "^0.7.0",
+    "express": "^4.21.2",
+    "express-session": "^1.18.1",
+    "memorystore": "^1.6.7",
+    "nodemailer": "^7.0.5",
+    "pg": "^8.13.1",
+    "zod": "^3.24.2",
+    "zod-validation-error": "^3.4.0"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.31.4"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/faith-consulting-platform/faithmundia.git"
+  },
+  "keywords": [
+    "consulting",
+    "faith-mundia",
+    "business",
+    "strategy",
+    "kenya"
+  ],
+  "author": "Faith Mundia <consult@faithmundia.co.ke>",
+  "homepage": "https://faithmundia.co.ke"
+}
