@@ -1,0 +1,315 @@
+// server/index.ts
+import express2 from "express";
+
+// server/routes.ts
+import { createServer } from "http";
+
+// shared/schema.ts
+import { sql } from "drizzle-orm";
+import { pgTable, text, varchar, timestamp } from "drizzle-orm/pg-core";
+import { createInsertSchema } from "drizzle-zod";
+import { z } from "zod";
+var users = pgTable("users", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  username: text("username").notNull().unique(),
+  password: text("password").notNull()
+});
+var consultationRequests = pgTable("consultation_requests", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  name: text("name").notNull(),
+  email: text("email").notNull(),
+  organization: text("organization"),
+  serviceType: text("service_type").notNull(),
+  budget: text("budget"),
+  timeline: text("timeline"),
+  description: text("description").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull()
+});
+var insertUserSchema = createInsertSchema(users).pick({
+  username: true,
+  password: true
+});
+var insertConsultationRequestSchema = createInsertSchema(consultationRequests).omit({
+  id: true,
+  createdAt: true
+}).extend({
+  name: z.string().min(2, "Name must be at least 2 characters"),
+  email: z.string().email("Please enter a valid email address"),
+  organization: z.string().optional(),
+  serviceType: z.enum(["individual", "startup", "enterprise", "workshop"], {
+    required_error: "Please select a service type"
+  }),
+  budget: z.string().optional(),
+  timeline: z.string().optional(),
+  description: z.string().min(10, "Please provide at least 10 characters describing your needs")
+});
+
+// server/storage.ts
+import { randomUUID } from "crypto";
+import { neon } from "@neondatabase/serverless";
+import { drizzle } from "drizzle-orm/neon-http";
+import { eq } from "drizzle-orm";
+var MemStorage = class {
+  users;
+  consultationRequests;
+  constructor() {
+    this.users = /* @__PURE__ */ new Map();
+    this.consultationRequests = /* @__PURE__ */ new Map();
+  }
+  async getUser(id) {
+    return this.users.get(id);
+  }
+  async getUserByUsername(username) {
+    return Array.from(this.users.values()).find(
+      (user) => user.username === username
+    );
+  }
+  async createUser(insertUser) {
+    const id = randomUUID();
+    const user = { ...insertUser, id };
+    this.users.set(id, user);
+    return user;
+  }
+  async createConsultationRequest(insertRequest) {
+    const id = randomUUID();
+    const request = {
+      ...insertRequest,
+      organization: insertRequest.organization || null,
+      budget: insertRequest.budget || null,
+      timeline: insertRequest.timeline || null,
+      id,
+      createdAt: /* @__PURE__ */ new Date()
+    };
+    this.consultationRequests.set(id, request);
+    return request;
+  }
+  async getConsultationRequests() {
+    return Array.from(this.consultationRequests.values());
+  }
+};
+var PostgresStorage = class {
+  db;
+  constructor(databaseUrl) {
+    const sql2 = neon(databaseUrl);
+    this.db = drizzle(sql2);
+  }
+  async getUser(id) {
+    const result = await this.db.select().from(users).where(eq(users.id, id));
+    return result[0];
+  }
+  async getUserByUsername(username) {
+    const result = await this.db.select().from(users).where(eq(users.username, username));
+    return result[0];
+  }
+  async createUser(insertUser) {
+    const result = await this.db.insert(users).values({
+      ...insertUser,
+      id: randomUUID()
+    }).returning();
+    return result[0];
+  }
+  async createConsultationRequest(insertRequest) {
+    const result = await this.db.insert(consultationRequests).values({
+      ...insertRequest,
+      id: randomUUID()
+    }).returning();
+    return result[0];
+  }
+  async getConsultationRequests() {
+    return await this.db.select().from(consultationRequests);
+  }
+};
+var storage = process.env.NODE_ENV === "production" && process.env.DATABASE_URL ? new PostgresStorage(process.env.DATABASE_URL) : new MemStorage();
+
+// server/routes.ts
+import { z as z2 } from "zod";
+import nodemailer from "nodemailer";
+async function registerRoutes(app2) {
+  const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: parseInt(process.env.SMTP_PORT || "587"),
+    secure: false,
+    requireTLS: true,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS
+    },
+    tls: {
+      rejectUnauthorized: false
+    }
+  });
+  app2.post("/api/consultation-requests", async (req, res) => {
+    try {
+      const validatedData = insertConsultationRequestSchema.parse(req.body);
+      const request = await storage.createConsultationRequest(validatedData);
+      try {
+        await transporter.sendMail({
+          from: process.env.SMTP_USER,
+          to: process.env.NOTIFICATION_EMAIL,
+          subject: `New Consultation Request - ${validatedData.serviceType}`,
+          html: `
+            <h2>New Consultation Request</h2>
+            <p><strong>Name:</strong> ${validatedData.name}</p>
+            <p><strong>Email:</strong> ${validatedData.email}</p>
+            <p><strong>Organization:</strong> ${validatedData.organization || "Not provided"}</p>
+            <p><strong>Service Type:</strong> ${validatedData.serviceType}</p>
+            <p><strong>Budget:</strong> ${validatedData.budget || "Not specified"}</p>
+            <p><strong>Timeline:</strong> ${validatedData.timeline || "Not specified"}</p>
+            <p><strong>Description:</strong></p>
+            <p>${validatedData.description}</p>
+          `
+        });
+      } catch (emailError) {
+        console.error("Failed to send email notification:", emailError);
+      }
+      res.json({ success: true, message: "Request submitted successfully", id: request.id });
+    } catch (error) {
+      if (error instanceof z2.ZodError) {
+        res.status(400).json({
+          success: false,
+          message: "Validation failed",
+          errors: error.errors
+        });
+      } else {
+        console.error("Error creating consultation request:", error);
+        res.status(500).json({
+          success: false,
+          message: "Failed to submit request. Please try again."
+        });
+      }
+    }
+  });
+  app2.get("/api/consultation-requests", async (req, res) => {
+    try {
+      const requests = await storage.getConsultationRequests();
+      res.json(requests);
+    } catch (error) {
+      console.error("Error fetching consultation requests:", error);
+      res.status(500).json({ message: "Failed to fetch requests" });
+    }
+  });
+  const httpServer = createServer(app2);
+  return httpServer;
+}
+
+// server/vite.ts
+import express from "express";
+import fs from "fs";
+import path from "path";
+import { nanoid } from "nanoid";
+var viteLogger = console;
+function log(message, source = "express") {
+  const formattedTime = (/* @__PURE__ */ new Date()).toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true
+  });
+  console.log(`${formattedTime} [${source}] ${message}`);
+}
+async function setupVite(app2, server) {
+  const vite = await import("vite");
+  const serverOptions = {
+    middlewareMode: true,
+    hmr: { server },
+    allowedHosts: true
+  };
+  const viteServer = await vite.createServer({
+    configFile: path.resolve(import.meta.dirname, "..", "vite.config.ts"),
+    root: path.resolve(import.meta.dirname, "..", "client"),
+    customLogger: {
+      ...viteLogger,
+      error: (msg, options) => {
+        viteLogger.error(msg, options);
+        process.exit(1);
+      }
+    },
+    server: serverOptions,
+    appType: "custom"
+  });
+  app2.use(viteServer.middlewares);
+  app2.use("*", async (req, res, next) => {
+    const url = req.originalUrl;
+    try {
+      const clientTemplate = path.resolve(
+        import.meta.dirname,
+        "..",
+        "client",
+        "index.html"
+      );
+      let template = await fs.promises.readFile(clientTemplate, "utf-8");
+      template = template.replace(
+        `src="/src/main.tsx"`,
+        `src="/src/main.tsx?v=${nanoid()}"`
+      );
+      const page = await viteServer.transformIndexHtml(url, template);
+      res.status(200).set({ "Content-Type": "text/html" }).end(page);
+    } catch (e) {
+      viteServer.ssrFixStacktrace(e);
+      next(e);
+    }
+  });
+}
+function serveStatic(app2) {
+  const distPath = path.resolve(import.meta.dirname, "public");
+  if (!fs.existsSync(distPath)) {
+    throw new Error(
+      `Could not find the build directory: ${distPath}, make sure to build the client first`
+    );
+  }
+  app2.use(express.static(distPath));
+  app2.use("*", (_req, res) => {
+    res.sendFile(path.resolve(distPath, "index.html"));
+  });
+}
+
+// server/index.ts
+var app = express2();
+app.use(express2.json());
+app.use(express2.urlencoded({ extended: false }));
+app.use((req, res, next) => {
+  const start = Date.now();
+  const path2 = req.path;
+  let capturedJsonResponse = void 0;
+  const originalResJson = res.json;
+  res.json = function(bodyJson, ...args) {
+    capturedJsonResponse = bodyJson;
+    return originalResJson.apply(res, [bodyJson, ...args]);
+  };
+  res.on("finish", () => {
+    const duration = Date.now() - start;
+    if (path2.startsWith("/api")) {
+      let logLine = `${req.method} ${path2} ${res.statusCode} in ${duration}ms`;
+      if (capturedJsonResponse) {
+        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
+      }
+      if (logLine.length > 80) {
+        logLine = logLine.slice(0, 79) + "\u2026";
+      }
+      log(logLine);
+    }
+  });
+  next();
+});
+(async () => {
+  const server = await registerRoutes(app);
+  app.use((err, _req, res, _next) => {
+    const status = err.status || err.statusCode || 500;
+    const message = err.message || "Internal Server Error";
+    res.status(status).json({ message });
+    throw err;
+  });
+  if (app.get("env") === "development") {
+    await setupVite(app, server);
+  } else {
+    serveStatic(app);
+  }
+  const port = parseInt(process.env.PORT || "5000", 10);
+  server.listen({
+    port,
+    host: "0.0.0.0",
+    reusePort: true
+  }, () => {
+    log(`serving on port ${port}`);
+  });
+})();
